@@ -39,25 +39,46 @@ function App() {
 
   // Setup SignalR listeners
   useEffect(() => {
-    if (status === 'processing') {
-      connect()
-      on('progress', (percent: number, eta: number) => {
-        setProgress(percent)
-        setEta(eta > 0 ? eta : undefined)
-      })
-      on('completed', () => {
-        setStatus('completed')
-        setProgress(100)
-        setEta(undefined)
-      })
-      on('error', (message: string) => {
-        setStatus('error')
-        setErrorMessage(message)
-        disconnect()
-      })
+    let isMounted = true
+
+    const setupListeners = async () => {
+      if (status === 'processing') {
+        try {
+          await connect()
+          if (isMounted) {
+            on('progress', (percent: number, eta: number) => {
+              if (isMounted) {
+                setProgress(percent)
+                setEta(eta > 0 ? eta : undefined)
+              }
+            })
+            on('completed', () => {
+              if (isMounted) {
+                setStatus('completed')
+                setProgress(100)
+                setEta(undefined)
+              }
+            })
+            on('error', (message: string) => {
+              if (isMounted) {
+                setStatus('error')
+                setErrorMessage(message)
+                disconnect()
+              }
+            })
+          }
+        } catch (error) {
+          if (isMounted) {
+            console.error('Failed to setup SignalR listeners:', error)
+          }
+        }
+      }
     }
 
+    setupListeners()
+
     return () => {
+      isMounted = false
       if (status === 'processing') {
         off('progress')
         off('completed')
