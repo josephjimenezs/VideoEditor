@@ -142,6 +142,19 @@ public class FFmpegService : IFFmpegService
         double duration = 0;
         try { duration = await GetVideoDurationAsync(inputPath); } catch { /* thumbnail or concat may not need duration */ }
 
+        // For Trim operation, calculate the actual segment duration for accurate progress
+        if (request.Operation == VideoEditOperation.Trim && 
+            !string.IsNullOrWhiteSpace(request.StartTime) && 
+            !string.IsNullOrWhiteSpace(request.EndTime))
+        {
+            if (TimeSpan.TryParse(request.StartTime, out var start) && TimeSpan.TryParse(request.EndTime, out var end))
+            {
+                var segmentDuration = end - start;
+                if (segmentDuration.TotalSeconds > 0)
+                    duration = segmentDuration.TotalSeconds;
+            }
+        }
+
         var arguments = FFmpegUtils.BuildArguments(inputPath, watermarkPath, subtitlePath, concatListPath, request, outputPath);
         _logger.LogInformation($"FFmpeg arguments: {arguments}");
         await RunFFmpegAsync(arguments, duration, progress, cancellationToken);
