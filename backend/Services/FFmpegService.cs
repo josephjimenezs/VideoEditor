@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using VideoProcessor.Models;
 using VideoProcessor.Utils;
 
 namespace VideoProcessor.Services;
@@ -13,6 +15,7 @@ public class FFmpegService : IFFmpegService
         _logger = logger;
     }
 
+    // ── Duration (used for progress) ──────────────────────────────────────────
     public async Task<double> GetVideoDurationAsync(string inputPath)
     {
         try
@@ -27,40 +30,18 @@ public class FFmpegService : IFFmpegService
                 CreateNoWindow = true
             };
 
-            using (var process = Process.Start(psi))
-            {
-                if (process == null)
-                    throw new InvalidOperationException("Failed to start ffprobe process");
+            using var process = Process.Start(psi)
+                ?? throw new InvalidOperationException("Failed to start ffprobe process");
 
-                var output = await process.StandardOutput.ReadToEndAsync();
-                var error = await process.StandardError.ReadToEndAsync();
-                await process.WaitForExitAsync();
+            var output = await process.StandardOutput.ReadToEndAsync();
+            await process.StandardError.ReadToEndAsync(); // drain stderr
+            await process.WaitForExitAsync();
 
-                if (!string.IsNullOrWhiteSpace(error))
-                {
-                    _logger.LogError($"ffprobe error output: {error}");
-                }
+            var trimmed = output.Trim();
+            if (double.TryParse(trimmed, System.Globalization.CultureInfo.InvariantCulture, out var duration) && duration > 0)
+                return duration;
 
-                var trimmedOutput = output.Trim();
-                _logger.LogDebug($"ffprobe raw output: '{trimmedOutput}'");
-
-                if (string.IsNullOrWhiteSpace(trimmedOutput))
-                {
-                    throw new InvalidOperationException($"ffprobe returned empty output for file: {inputPath}");
-                }
-
-                if (double.TryParse(trimmedOutput, System.Globalization.CultureInfo.InvariantCulture, out var duration))
-                {
-                    if (duration > 0)
-                    {
-                        _logger.LogInformation($"Video duration: {duration} seconds");
-                        return duration;
-                    }
-                    throw new InvalidOperationException("Video duration is zero or negative");
-                }
-
-                throw new InvalidOperationException($"Could not parse duration from ffprobe output: '{trimmedOutput}'");
-            }
+            throw new InvalidOperationException($"Could not parse duration from ffprobe output: '{trimmed}'");
         }
         catch (Exception ex)
         {
@@ -69,78 +50,155 @@ public class FFmpegService : IFFmpegService
         }
     }
 
-    public async Task ProcessVideoAsync(string inputPath, string outputPath, string format, IProgress<double> progress, CancellationToken cancellationToken)
+    // ── Video metadata via ffprobe JSON ───────────────────────────────────────
+    public async Task<VideoMetadata> GetVideoInfoAsync(string inputPath)
     {
-        try
+        var psi = new ProcessStartInfo
         {
-            var duration = await GetVideoDurationAsync(inputPath);
-            var arguments = FFmpegUtils.GetFFmpegArguments(inputPath, outputPath, format);
+            FileName = "ffprobe",
+            Arguments = $"-v quiet -print_format json -show_streams -show_format \"{inputPath}\"",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
 
-            var psi = new ProcessStartInfo
+        using var process = Process.Start(psi)
+            ?? throw new InvalidOperationException("Failed to start ffprobe");
+
+        var json = await process.StandardOutput.ReadToEndAsync();
+        await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+
+        var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        var metadata = new VideoMetadata();
+
+        if (root.TryGetProperty("format", out var fmt))
+        {
+            if (fmt.TryGetProperty("duration", out var dur))
             {
-                FileName = "ffmpeg",
-                Arguments = $"-y {arguments}",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-
-            using (var process = Process.Start(psi))
+                if (double.TryParse(dur.GetString(), System.Globalization.CultureInfo.InvariantCulture, out var duration))
+                    metadata.Duration = duration;
+            }
+            if (fmt.TryGetProperty("size", out var sz))
             {
-                if (process == null)
-                    throw new InvalidOperationException("Failed to start ffmpeg process");
-
-                var outputTask = Task.Run(() =>
-                {
-                    string? line;
-                    while ((line = process.StandardOutput.ReadLine()) != null)
-                    {
-                        if (line.StartsWith("out_time_ms="))
-                        {
-                            if (long.TryParse(line.Substring(12), out var timeMs))
-                            {
-                                var timeSeconds = timeMs / 1_000_000.0;
-                                if (duration > 0)
-                                {
-                                    var progressPercent = Math.Min(100, (timeSeconds / duration) * 100);
-                                    progress.Report(progressPercent);
-                                    _logger.LogInformation($"Processing progress: {progressPercent:F1}%");
-                                }
-                            }
-                        }
-                    }
-                });
-
-                var errorTask = Task.Run(async () =>
-                {
-                    var error = await process.StandardError.ReadToEndAsync();
-                    if (!string.IsNullOrWhiteSpace(error))
-                    {
-                        _logger.LogInformation($"FFmpeg output: {error}");
-                    }
-                });
-
-                await process.WaitForExitAsync(cancellationToken);
-                await outputTask;
-                await errorTask;
-
-                if (process.ExitCode != 0)
-                {
-                    throw new InvalidOperationException($"FFmpeg process exited with code {process.ExitCode}");
-                }
-
-                progress.Report(100);
-                _logger.LogInformation("Video processing completed successfully");
+                if (long.TryParse(sz.GetString(), System.Globalization.CultureInfo.InvariantCulture, out var fileSize))
+                    metadata.FileSizeBytes = fileSize;
             }
         }
-        catch (Exception ex)
+
+        if (root.TryGetProperty("streams", out var streams))
         {
-            _logger.LogError($"Error processing video: {ex.Message}");
-            throw;
+            foreach (var stream in streams.EnumerateArray())
+            {
+                if (!stream.TryGetProperty("codec_type", out var codecType)) continue;
+                var type = codecType.GetString();
+
+                if (type == "video" && metadata.VideoCodec == "")
+                {
+                    metadata.Width = stream.TryGetProperty("width", out var w) ? w.GetInt32() : 0;
+                    metadata.Height = stream.TryGetProperty("height", out var h) ? h.GetInt32() : 0;
+                    metadata.VideoCodec = stream.TryGetProperty("codec_name", out var vc) ? vc.GetString() ?? "" : "";
+
+                    if (stream.TryGetProperty("r_frame_rate", out var fr))
+                    {
+                        var parts = fr.GetString()?.Split('/');
+                        if (parts?.Length == 2 && double.TryParse(parts[0], out var num) && double.TryParse(parts[1], out var den) && den > 0)
+                            metadata.Fps = Math.Round(num / den, 2);
+                    }
+                }
+                else if (type == "audio" && metadata.AudioCodec == "")
+                {
+                    metadata.AudioCodec = stream.TryGetProperty("codec_name", out var ac) ? ac.GetString() ?? "" : "";
+                    metadata.AudioBitrate = stream.TryGetProperty("bit_rate", out var ab) ? ab.GetString() ?? "" : "";
+                }
+            }
         }
+
+        return metadata;
     }
 
+    // ── Original format-conversion processor (kept for compatibility) ─────────
+    public async Task ProcessVideoAsync(string inputPath, string outputPath, string format, IProgress<double> progress, CancellationToken cancellationToken)
+    {
+        var duration = await GetVideoDurationAsync(inputPath);
+        var arguments = FFmpegUtils.GetFFmpegArguments(inputPath, outputPath, format);
+        await RunFFmpegAsync($"-y {arguments}", duration, progress, cancellationToken);
+    }
+
+    // ── New operation-aware processor ─────────────────────────────────────────
+    public async Task EditVideoAsync(
+        string inputPath,
+        string? watermarkPath,
+        string? subtitlePath,
+        string? concatListPath,
+        VideoEditRequest request,
+        string outputPath,
+        IProgress<double> progress,
+        CancellationToken cancellationToken)
+    {
+        double duration = 0;
+        try { duration = await GetVideoDurationAsync(inputPath); } catch { /* thumbnail or concat may not need duration */ }
+
+        var arguments = FFmpegUtils.BuildArguments(inputPath, watermarkPath, subtitlePath, concatListPath, request, outputPath);
+        _logger.LogInformation($"FFmpeg arguments: {arguments}");
+        await RunFFmpegAsync(arguments, duration, progress, cancellationToken);
+    }
+
+    // ── Shared FFmpeg runner with progress parsing ────────────────────────────
+    private async Task RunFFmpegAsync(string arguments, double duration, IProgress<double> progress, CancellationToken cancellationToken)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "ffmpeg",
+            Arguments = arguments,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+
+        using var process = Process.Start(psi)
+            ?? throw new InvalidOperationException("Failed to start ffmpeg process");
+
+        var outputTask = Task.Run(() =>
+        {
+            string? line;
+            while ((line = process.StandardOutput.ReadLine()) != null)
+            {
+                if (line.StartsWith("out_time_ms=") && long.TryParse(line[12..], out var timeMs))
+                {
+                    var timeSecond = timeMs / 1_000_000.0;
+                    if (duration > 0)
+                    {
+                        var pct = Math.Min(100, (timeSecond / duration) * 100);
+                        progress.Report(pct);
+                    }
+                }
+            }
+        }, cancellationToken);
+
+        var errorTask = Task.Run(async () =>
+        {
+            var err = await process.StandardError.ReadToEndAsync(cancellationToken);
+            if (!string.IsNullOrWhiteSpace(err))
+                _logger.LogInformation($"FFmpeg stderr: {err}");
+        }, cancellationToken);
+
+        await process.WaitForExitAsync(cancellationToken);
+        await outputTask;
+        await errorTask;
+
+        if (process.ExitCode != 0)
+            throw new InvalidOperationException($"FFmpeg exited with code {process.ExitCode}");
+
+        progress.Report(100);
+        _logger.LogInformation("FFmpeg processing completed successfully");
+    }
+
+    // ── Validation ────────────────────────────────────────────────────────────
     public async Task<bool> ValidateFFmpegInstalledAsync()
     {
         try
@@ -153,17 +211,11 @@ public class FFmpegService : IFFmpegService
                 RedirectStandardOutput = true,
                 CreateNoWindow = true
             };
-
-            using (var process = Process.Start(psi))
-            {
-                if (process == null) return false;
-                await process.WaitForExitAsync();
-                return process.ExitCode == 0;
-            }
+            using var process = Process.Start(psi);
+            if (process == null) return false;
+            await process.WaitForExitAsync();
+            return process.ExitCode == 0;
         }
-        catch
-        {
-            return false;
-        }
+        catch { return false; }
     }
 }
