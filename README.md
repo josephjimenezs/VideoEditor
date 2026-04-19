@@ -6,6 +6,9 @@ docker run -d -p 5000:5000 --restart unless-stopped --name videoback josephjimen
 docker run -d -p 3000:3000 --restart unless-stopped --name videofront josephjimenezs/video-editor-frontend:latest
 ```
 
+Then just open the url:  http://localhost:3000
+
+
 ## Local Development
 ```bash
 podman-compose -f docker-compose.dev.yml up --build
