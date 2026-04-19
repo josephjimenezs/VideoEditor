@@ -1,4 +1,3 @@
-/.github/
 /.env.secrets
 /data/*
 !/data/.gitkeep
