@@ -25,7 +25,7 @@ docker logout
 docker login
 # Luego busca el token en ~/.docker/config.json
 ```
-
+ 
 ## Paso 2: Verificar los Workflows
 
 Los workflows están en `.github/workflows/`:
