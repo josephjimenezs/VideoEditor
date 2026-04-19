@@ -42,11 +42,11 @@ jobs:
         with:
           context: ./backend
           push: true
-          tags: ${{ secrets.DOCKER_USERNAME }}/video-processor-backend:latest
+          tags: ${{ secrets.DOCKER_USERNAME }}/video-editor-backend:latest
       
       - name: Build and push frontend
         uses: docker/build-push-action@v5
         with:
           context: ./frontend
           push: true
-          tags: ${{ secrets.DOCKER_USERNAME }}/video-processor-frontend:latest
+          tags: ${{ secrets.DOCKER_USERNAME }}/video-editor-frontend:latest
