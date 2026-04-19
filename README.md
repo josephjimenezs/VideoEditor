@@ -1,6 +1,6 @@
 # VideoEditor
 
-## Test the deployed image
+## RUN the deployed image
 ```bash
 docker run -d -p 5000:5000 --restart unless-stopped --name videoback josephjimenezs/video-editor-backend:latest
 docker run -d -p 3000:3000 --restart unless-stopped --name videofront josephjimenezs/video-editor-frontend:latest
