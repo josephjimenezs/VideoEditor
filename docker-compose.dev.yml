@@ -12,7 +12,7 @@ services:
       ASPNETCORE_ENVIRONMENT: Development
       ASPNETCORE_URLS: http://+:5000
     volumes:
-      - shared_data:/data
+      - ./data:/data
     networks:
       - video-processor-network
     restart: unless-stopped
@@ -36,10 +36,6 @@ services:
     networks:
       - video-processor-network
     restart: unless-stopped
-
-volumes:
-  shared_data:
-    driver: local
 
 networks:
   video-processor-network:

@@ -5,6 +5,3 @@ chmod 777 /data
 
 # Run the application
 exec "$@"
-
-
-

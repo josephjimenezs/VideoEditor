@@ -276,7 +276,7 @@ public static class FFmpegUtils
         {
             ".mp4", ".mkv", ".webm", ".avi", ".mov",
             ".flv", ".wmv", ".m4v", ".ts", ".mts",
-            ".m2ts", ".3gp", ".ogv"
+            ".m2ts", ".3gp", ".ogv", ".vob"
         };
         var extension = Path.GetExtension(filename).ToLower();
         return validExtensions.Contains(extension);
